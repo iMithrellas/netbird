@@ -72,6 +72,7 @@ type Server struct {
 	authManager    auth.Manager
 	sessionStore   *auth.SessionStore
 	challenger     *certposture.Challenger
+	externalFlow   externalFlowConfig
 
 	logBlockedPeers          bool
 	blockPeersWithSameConfig bool
@@ -109,6 +110,10 @@ func NewServer(
 	oAuthConfigProvider idp.OAuthConfigProvider,
 	sessionStore *auth.SessionStore,
 ) (*Server, error) {
+	externalFlow, err := loadExternalFlowConfig()
+	if err != nil {
+		return nil, fmt.Errorf("external flow collector: %w", err)
+	}
 	if appMetrics != nil {
 		// update gauge based on number of connected peers which is equal to open gRPC streams
 		err := appMetrics.GRPCMetrics().RegisterConnectedStreams(func() int64 {
@@ -143,6 +148,7 @@ func NewServer(
 	}
 
 	return &Server{
+		externalFlow:             externalFlow,
 		challenger:               newCertChallenger(config.DataStoreEncryptionKey, serverKey),
 		jobManager:               jobManager,
 		accountManager:           accountManager,
@@ -330,7 +336,8 @@ func (s *Server) Sync(req *proto.EncryptedMessage, srv proto.ManagementService_S
 	}
 
 	trackChallenge := func() { s.accountManager.TrackCertificateChallenges(ctx, accountID, peer.ID, syncStart) }
-	err = s.sendInitialSync(ctx, peerKey, peer, netMap, postureChecks, srv, dnsFwdPort, settings, trackChallenge)
+	flow := s.externalFlow.forPeer(peer, peerKey)
+	err = s.sendInitialSync(ctx, peerKey, peer, netMap, postureChecks, srv, dnsFwdPort, settings, trackChallenge, flow)
 	if err != nil {
 		log.WithContext(ctx).Debugf("error while sending initial sync for %s: %v", peerKey.String(), err)
 		s.syncSem.Add(-1)
@@ -365,10 +372,11 @@ func (s *Server) Sync(req *proto.EncryptedMessage, srv proto.ManagementService_S
 
 	s.syncSem.Add(-1)
 
-	return PeerUpdateHandlerFactory(peerKey, updates, s.secretsManager, s.challenger,
+	handler := PeerUpdateHandlerFactory(peerKey, updates, s.secretsManager, s.challenger,
 		trackChallenge,
-		srv, func() { s.cancelPeerRoutines(ctx, accountID, peer, syncStart, updates) }).
-		WithMetrics(s.appMetrics).HandleUpdates(ctx)
+		srv, func() { s.cancelPeerRoutines(ctx, accountID, peer, syncStart, updates) })
+	handler.flow = flow
+	return handler.WithMetrics(s.appMetrics).HandleUpdates(ctx)
 }
 
 func (s *Server) handleHandshake(ctx context.Context, srv proto.ManagementService_JobServer) (wgtypes.Key, error) {
@@ -969,7 +977,7 @@ func (s *Server) IsHealthy(ctx context.Context, req *proto.Empty) (*proto.Empty,
 }
 
 // sendInitialSync sends initial proto.SyncResponse to the peer requesting synchronization
-func (s *Server) sendInitialSync(ctx context.Context, peerKey wgtypes.Key, peer *nbpeer.Peer, networkMap *types.NetworkMap, postureChecks []*nmdata.PostureChecks, srv proto.ManagementService_SyncServer, dnsFwdPort int64, settings *types.Settings, onChallengeStamped func()) error {
+func (s *Server) sendInitialSync(ctx context.Context, peerKey wgtypes.Key, peer *nbpeer.Peer, networkMap *types.NetworkMap, postureChecks []*nmdata.PostureChecks, srv proto.ManagementService_SyncServer, dnsFwdPort int64, settings *types.Settings, onChallengeStamped func(), flow *externalFlowSession) error {
 	var err error
 	var turnToken *Token
 
@@ -1026,6 +1034,10 @@ func (s *Server) sendInitialSync(ctx context.Context, peerKey wgtypes.Key, peer 
 	}
 
 	setAuthToken(plainResp.NetbirdConfig, authToken)
+	if err := flow.apply(plainResp.NetbirdConfig); err != nil {
+		return err
+	}
+	flow.observe(plainResp.NetbirdConfig)
 
 	key, err := s.secretsManager.GetWGKey()
 	if err != nil {

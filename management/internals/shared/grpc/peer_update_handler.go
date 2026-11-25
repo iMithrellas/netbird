@@ -55,6 +55,7 @@ type PeerUpdateHandler struct {
 	encrypter          encryption.Encrypter
 	debouncer          Debouncer
 	cleanupFunc        func()
+	flow               *externalFlowSession
 }
 
 func (pu *PeerUpdateHandler) WithMetrics(appMetrics telemetry.AppMetrics) *PeerUpdateHandler {
@@ -72,9 +73,15 @@ func (pu *PeerUpdateHandler) HandleUpdates(ctx context.Context) error {
 	log.WithContext(ctx).Tracef("starting to handle updates for peer %s", pu.peerKey.String())
 
 	defer pu.debouncer.Stop()
+	flowTicks, stop := pu.flow.refreshTicks()
+	defer stop()
 
 	for {
 		select {
+		case <-flowTicks:
+			if err := pu.renewExternalFlow(ctx); err != nil {
+				return err
+			}
 		// condition when there are some updates
 		// todo set the updates channel size to 1
 		case update, open := <-pu.updates:
@@ -144,6 +151,7 @@ func (pu *PeerUpdateHandler) SendUpdate(ctx context.Context, update *network_map
 		pu.cleanupFunc()
 		return status.Errorf(codes.Internal, "failed sending update message")
 	}
+	pu.flow.observe(update.Update.GetNetbirdConfig())
 	log.WithContext(ctx).Tracef("sent an update to peer %s", pu.peerKey.String())
 	return nil
 }
