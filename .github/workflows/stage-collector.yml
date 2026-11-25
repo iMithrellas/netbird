@@ -1,0 +1,20 @@
+name: Publish standalone collector PoC
+on:
+  push:
+    branches: [poc/publish-flowcollector-2f04bef]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    if: github.repository == 'iMithrellas/netbird'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish verified collector image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download stage-collector-2f04bef-wt6u3a -R "$GITHUB_REPOSITORY" -p flowcollector.oci
+          echo '839a193481b2c5db39f165ebc554c9952628a85ab39ce8125531fcd5c84b6d9f  flowcollector.oci' | sha256sum -c -
+          printf '%s' "$GH_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy oci-archive:flowcollector.oci docker://ghcr.io/imithrellas/flowcollector-poc:sha-2f04bef
