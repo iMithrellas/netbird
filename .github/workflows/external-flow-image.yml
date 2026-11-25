@@ -1,0 +1,47 @@
+name: Publish downstream flow PoC image
+
+on:
+  push:
+    branches: [poc/external-flow-collector]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.repository == 'iMithrellas/netbird'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      IMAGE: ghcr.io/imithrellas/netbird-server-flow-poc
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.26.10
+      - name: Build the combined server
+        run: |
+          mkdir -p "$RUNNER_TEMP/image/linux/amd64"
+          CGO_ENABLED=1 go build -mod=readonly -trimpath \
+            -ldflags="-s -w -X github.com/netbirdio/netbird/version.version=flow-poc-${GITHUB_SHA:0:12}" \
+            -o "$RUNNER_TEMP/image/linux/amd64/netbird-server" ./combined
+      - name: Package and smoke-test the image
+        run: |
+          docker build --platform linux/amd64 --file combined/Dockerfile \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
+            --tag "$IMAGE:sha-${GITHUB_SHA:0:12}" "$RUNNER_TEMP/image"
+          docker run --rm --network none "$IMAGE:sha-${GITHUB_SHA:0:12}" --help
+      - name: Publish to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          tag="$IMAGE:sha-${GITHUB_SHA:0:12}"
+          docker push "$tag"
+          docker tag "$tag" "$IMAGE:poc"
+          docker push "$IMAGE:poc"
