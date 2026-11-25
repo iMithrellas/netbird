@@ -1,0 +1,20 @@
+name: Publish collector proxy image
+on:
+  push:
+    branches: [poc/publish-collector-proxy-55bab63]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    if: github.repository == 'iMithrellas/netbird'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the tested image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download stage-flowproxy-55bab63 -R "$GITHUB_REPOSITORY" -p collector.oci
+          echo '51001672ea9f3cf6220e757d7fd424c2f233da4002f8346b895566d512fd1cce  collector.oci' | sha256sum -c -
+          printf '%s' "$GH_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy oci-archive:collector.oci docker://ghcr.io/imithrellas/flowcollector-poc:proxy-55bab63
